@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
-<title>Hex Bouncer — Minimal Rebuild</title>
+<title>Hex Bouncer — Mobile</title>
 <script>
 // =================== CONFIG ===================
 const CFG = {
@@ -20,10 +20,31 @@ const CFG = {
   // Physics / speeds
   dt: 1/60,
   speedMul: 1.25,
-  redSpeedRange: [130, 185],     // ↑ min speed bumped slightly
+  redSpeedRange: [130, 185],
   normalSpeedRange: [90, 210],
   redBounce: 0.96,
   normalBounceRange: [0.84, 0.97],
+  collisionSpeedBoost: 1.04,
+
+  // Boss (Duck)
+  duckLevel: 5,
+  duckSpeedMultiplier: 2.0,
+  duckBounceJitterDeg: 18,
+  duckRestitutionBoost: 1.02,
+  duckBallSizeRange: [16, 22],
+  bossLifeLoss: 2,
+
+  // Llama
+  llamaEnabled: true,
+  llamaScoreInterval: 500,
+  llamaLifetimeSec: 10,
+  llamaRadius: 24,
+  llamaSpeed: 220,
+  llamaAccel: 600,
+  llamaCollidesWalls: true,
+
+  // Extra gaps
+  partialGapSpan: [0.25, 0.75],  // open the middle 50% of a secondary edge every 5 levels
 
   // Visuals
   colors: {
@@ -41,6 +62,7 @@ const CFG = {
   .wrap { height:100%; display:grid; place-items:center; gap:14px; padding:16px; padding-bottom:calc(16px + env(safe-area-inset-bottom)); padding-top:calc(16px + env(safe-area-inset-top)); }
   canvas { width:min(92vmin,860px); height:min(92vmin,860px); max-width:100%; max-height:100%; background: radial-gradient(1200px at 50% 55%, #0f172a 0%, #0b0b0f 55%, #060608 100%); border-radius:14px; box-shadow:0 10px 40px rgba(0,0,0,.6), inset 0 0 60px rgba(0,0,0,.4); }
   .frame{ width:min(92vmin,860px); }
+  .title{ width:min(92vmin,860px); text-align:center; margin:8px 0 4px; font-size:clamp(20px,4.2vw,28px); font-weight:800; }
   .topbar{ display:grid; grid-template-columns:1fr 1fr; gap:20px; align-items:center; justify-items:stretch; }
   .stats{ display:flex; justify-content:space-between; align-items:center; gap:12px; margin-top:6px; margin-bottom:6px; }
   .pill{ padding:0; border-radius:12px; background:transparent; border:0; font-weight:600; font-size:clamp(18px,3.6vw,26px); }
@@ -50,7 +72,6 @@ const CFG = {
   .controls{ display:flex; justify-content:space-between; align-items:center; gap:12px; width:min(92vmin,860px); margin-top:14px; }
   .arrow{ min-width:100px; min-height:80px; font-size:22px; user-select:none; -webkit-user-select:none; opacity:.5; }
   .arrow.active{ transform:translateY(1px) scale(0.98); }
-.title{ width:min(92vmin,860px); text-align:center; margin:8px 0 4px; font-size:clamp(20px,4.2vw,28px); font-weight:800; }
   .controls-hint{ flex:1; text-align:center; font-weight:600; font-size:clamp(14px,3.6vw,18px); opacity:.9; }
 </style>
 </head>
@@ -87,6 +108,9 @@ const state = {
   angle:0,
   score:0, lives:CFG.startLives, level:1,
   balls:[], redBallId:null,
+  hasDuck:false,
+  llama:null,              // {x,y,vx,vy,r,ttl}
+  nextLlamaAt: CFG.llamaScoreInterval,
 };
 
 // ======= CANVAS =======
@@ -122,6 +146,8 @@ function beep(freq=600, dur=0.08, type='sine', vol=0.06){
 }
 function playBounce(){ beep(520, 0.06, 'square', 0.05); }
 function playDing(){ beep(880, 0.12, 'sine', 0.06); setTimeout(()=>beep(1320, 0.10, 'sine', 0.05), 60); }
+function playQuack(){ beep(220, 0.09, 'square', 0.06); setTimeout(()=>beep(300, 0.08, 'square', 0.05), 70); }
+function playWay(){ beep(660, 0.10, 'sine', 0.07); setTimeout(()=>beep(990, 0.08, 'sine', 0.06), 80); }
 
 // ======= INPUT =======
 const keys = new Set();
@@ -165,17 +191,22 @@ function getHexVertices(angle=0){
 }
 function edgeList(angle=0){ const vs=getHexVertices(angle); const e=[]; for(let i=0;i<6;i++){ const a=vs[i], b=vs[(i+1)%6]; e.push({a,b,index:i}); } return e; }
 
-// ======= GAME SETUP =======
-function hardReset(){
-  state.running=false; state.paused=false; pauseBtn.textContent='Pause';
-  state.angle=0; state.score=0; state.lives=CFG.startLives; state.level=1; state.balls=[]; state.redBallId=null;
-  updateHud(); draw();
+function getGapInfo(){
+  const full = CFG.openEdgeIndex;
+  const tiers = Math.floor((state.level - 1)/5); // 0 for 1-4, 1 for 5-9, etc.
+  let partial = null;
+  if (tiers > 0){
+    partial = (1 + tiers) % 6; // rotate to different edge
+    if (partial === full) partial = (partial + 1) % 6;
+  }
+  return { full, partial, pSpan: CFG.partialGapSpan };
 }
 function resetRound(){
-  // build new level with one red + N normals
+  // build new level with one red + normals + duck if active
   state.balls=[];
   const red=makeBall('red'); state.redBallId=red.id; state.balls.push(red);
   for(let i=0;i<CFG.baseBalls+(state.level-1);i++) state.balls.push(makeBall('normal'));
+  if (state.hasDuck) state.balls.push(makeBall('duck'));
   updateHud();
 }
 
@@ -184,11 +215,22 @@ function rand(min,max){ return Math.random()*(max-min)+min; }
 function overlapsAny(p, rad){ return state.balls.some(b=> Math.hypot(p.x-b.x,p.y-b.y) < (rad+b.r+4)); }
 function makeBall(type='normal'){
   const id=nextBallId++;
-  const isRed = type==='red';
-  const r = isRed ? rand(12,18) : rand(10,24);
-  const speed = (isRed? rand(...CFG.redSpeedRange) : rand(...CFG.normalSpeedRange)) * CFG.speedMul;
+  let r, speed, bounce;
+  if (type==='red'){
+    r = rand(12,18);
+    speed = rand(...CFG.redSpeedRange) * CFG.speedMul;
+    bounce = CFG.redBounce;
+  } else if (type==='duck') {
+    r = rand(...CFG.duckBallSizeRange);
+    const base = rand(...CFG.redSpeedRange);
+    speed = base * CFG.duckSpeedMultiplier * CFG.speedMul;
+    bounce = 0.98;
+  } else {
+    r = rand(10,24);
+    speed = rand(...CFG.normalSpeedRange) * CFG.speedMul;
+    bounce = rand(...CFG.normalBounceRange);
+  }
   const dir = rand(0,Math.PI*2);
-  const bounce = isRed? CFG.redBounce : rand(...CFG.normalBounceRange);
   // place near center without overlap
   let pos={x:0,y:0}, tries=0; do{ tries++; const rr=rand(0, CFG.worldScale*0.45); const th=rand(0,Math.PI*2); pos={x:rr*Math.cos(th), y:rr*Math.sin(th)}; } while(overlapsAny(pos,r)&&tries<300);
   return { id, type, x:pos.x, y:pos.y, vx:speed*Math.cos(dir), vy:speed*Math.sin(dir), r, bounce };
@@ -198,58 +240,200 @@ function makeBall(type='normal'){
 function step(dt){
   // rotate arena
   const rot=1.8; if(keys.has('ArrowLeft')) state.angle-=rot*dt; if(keys.has('ArrowRight')) state.angle+=rot*dt;
-  // integrate
+  // integrate balls
   for(const b of state.balls){ b.x+=b.vx*dt; b.y+=b.vy*dt; }
+  // integrate llama
+  updateLlama(dt);
+  // ball-ball collisions with speed boost
+  handleBallCollisions();
   // wall collisions
   handleHexCollisions();
   // scoring
   state.score += CFG.timeScoreRate*dt; 
+  // possible llama spawn after score update
+  maybeSpawnLlama();
   // escapes
   checkEscapes();
 }
 
-function handleHexCollisions(){
-  const edges=edgeList(state.angle);
-  const openIdx=CFG.openEdgeIndex;
-  for(const b of state.balls){
-    for(const e of edges){
-      const Ax=e.a.x, Ay=e.a.y, Bx=e.b.x, By=e.b.y;
-      const ABx=Bx-Ax, ABy=By-Ay;
-      const APx=b.x-Ax, APy=b.y-Ay;
-      const AB2=ABx*ABx+ABy*ABy;
-      let t=(APx*ABx+APy*ABy)/AB2; t=Math.max(0,Math.min(1,t));
-      if(e.index===openIdx) continue; // open edge
-      const Qx=Ax+t*ABx, Qy=Ay+t*ABy;
-      const dx=b.x-Qx, dy=b.y-Qy; const dist=Math.hypot(dx,dy);
-      if(dist < b.r){
-        const nx=dx/(dist||1e-6), ny=dy/(dist||1e-6);
-        const overlap=b.r-dist+0.01; b.x+=nx*overlap; b.y+=ny*overlap;
-        // reflect
-        const vdotn=b.vx*nx + b.vy*ny; if(vdotn<0){
-          const eRest=b.bounce; b.vx -= (1+eRest)*vdotn*nx; b.vy -= (1+eRest)*vdotn*ny; if (b.type==='red') playBounce();
+// FIXED: proper function signature
+function reflectWithNormal(b, nx, ny){
+  const vdotn=b.vx*nx + b.vy*ny;
+  if(vdotn<0){
+    let restitution=b.bounce;
+    if (b.type==='duck') restitution = b.bounce * CFG.duckRestitutionBoost;
+    b.vx -= (1+restitution)*vdotn*nx; b.vy -= (1+restitution)*vdotn*ny;
+    if (b.type==='duck'){
+      const jitter=(CFG.duckBounceJitterDeg*Math.PI/180)*(Math.random()*2-1);
+      const sp=Math.hypot(b.vx,b.vy); const ang=Math.atan2(b.vy,b.vx)+jitter;
+      b.vx=sp*Math.cos(ang); b.vy=sp*Math.sin(ang);
+    }
+    if (b.type==='red') playBounce();
+  }
+}
+
+function handleBallCollisions(){
+  const n = state.balls.length;
+  for (let i=0;i<n;i++){
+    for (let j=i+1;j<n;j++){
+      const a = state.balls[i], b = state.balls[j];
+      const dx = b.x - a.x, dy = b.y - a.y;
+      const dist = Math.hypot(dx,dy);
+      const minDist = a.r + b.r;
+      if (dist > 0 && dist < minDist){
+        const nx = dx / dist, ny = dy / dist;
+        // masses ~ area so bigger balls carry more momentum
+        const ma = a.r * a.r;
+        const mb = b.r * b.r;
+        // positional correction to resolve overlap proportionally to mass
+        const overlap = (minDist - dist) + 0.01;
+        const invMass = 1/(ma+mb);
+        a.x -= nx * overlap * (mb * invMass);
+        a.y -= ny * overlap * (mb * invMass);
+        b.x += nx * overlap * (ma * invMass);
+        b.y += ny * overlap * (ma * invMass);
+        // relative velocity along collision normal
+        const rvx = b.vx - a.vx, rvy = b.vy - a.vy;
+        const vrel = rvx*nx + rvy*ny;
+        if (vrel < 0){
+          const e = Math.min(a.bounce, b.bounce);
+          const jImpulse = -(1+e) * vrel / (1/ma + 1/mb);
+          const jx = jImpulse * nx, jy = jImpulse * ny;
+          a.vx -= jx / ma; a.vy -= jy / ma;
+          b.vx += jx / mb; b.vy += jy / mb;
+          // small post-collision speed boost
+          a.vx *= CFG.collisionSpeedBoost; a.vy *= CFG.collisionSpeedBoost;
+          b.vx *= CFG.collisionSpeedBoost; b.vy *= CFG.collisionSpeedBoost;
         }
       }
     }
   }
 }
 
+function handleHexCollisions(){
+  const edges = edgeList(state.angle);
+  const { full, partial, pSpan } = getGapInfo();
+  const collide = (ent,isBall=true)=>{
+    for(const e of edges){
+      const Ax=e.a.x, Ay=e.a.y, Bx=e.b.x, By=e.b.y;
+      const ABx=Bx-Ax, ABy=By-Ay;
+      const APx=ent.x-Ax, APy=ent.y-Ay;
+      const AB2=ABx*ABx+ABy*ABy;
+      let t=(APx*ABx+APy*ABy)/AB2; t=Math.max(0,Math.min(1,t));
+
+      // skip collisions on open parts
+      const isFullOpen = (e.index === full);
+      const isPartialOpen = (partial !== null && e.index === partial && t >= pSpan[0] && t <= pSpan[1]);
+      if (isFullOpen || isPartialOpen) continue;
+
+      const Qx=Ax+t*ABx, Qy=Ay+t*ABy;
+      const dx=ent.x-Qx, dy=ent.y-Qy; const dist=Math.hypot(dx,dy);
+      const rad = ent.r||0;
+      if(dist < rad){
+        const nx=dx/(dist||1e-6), ny=dy/(dist||1e-6);
+        const overlap=rad-dist+0.01; ent.x+=nx*overlap; ent.y+=ny*overlap;
+        if (isBall) reflectWithNormal(ent,nx,ny); else {
+          // llama mild bounce
+          const eRest=0.9; const vdotn=(ent.vx||0)*nx + (ent.vy||0)*ny; if(vdotn<0){ ent.vx-=(1+eRest)*vdotn*nx; ent.vy-=(1+eRest)*vdotn*ny; }
+        }
+      }
+    }
+  };
+  for (const b of state.balls) collide(b,true);
+  if (state.llama && CFG.llamaCollidesWalls) collide(state.llama,false);
+}
+
+function updateLlama(dt){
+  if (!state.llama) return;
+  state.llama.ttl -= dt;
+  const red = state.balls.find(b=>b.id===state.redBallId);
+  if (red){
+    const dx=red.x-state.llama.x, dy=red.y-state.llama.y; const d=Math.hypot(dx,dy)||1;
+    const desiredVx=(dx/d)*CFG.llamaSpeed, desiredVy=(dy/d)*CFG.llamaSpeed;
+    const ax=desiredVx-(state.llama.vx||0), ay=desiredVy-(state.llama.vy||0);
+    const alen=Math.hypot(ax,ay)||1; const maxDv=CFG.llamaAccel*dt; const s=Math.min(1, maxDv/alen);
+    state.llama.vx=(state.llama.vx||0)+ax*s; state.llama.vy=(state.llama.vy||0)+ay*s;
+  }
+  state.llama.x += (state.llama.vx||0)*dt; state.llama.y += (state.llama.vy||0)*dt;
+  if (state.llama.ttl<=0) state.llama=null;
+}
+
+function maybeSpawnLlama(){
+  if (!CFG.llamaEnabled) return;
+  if (state.llama) return;
+  if (Math.floor(state.score) >= state.nextLlamaAt){
+    state.llama = { x: rand(-60,60), y: rand(-60,60), vx:0, vy:0, r: CFG.llamaRadius, ttl: CFG.llamaLifetimeSec };
+    state.nextLlamaAt += CFG.llamaScoreInterval;
+    playWay();
+  }
+}
+
 function checkEscapes(){
-  const edges=edgeList(state.angle); const open=edges[CFG.openEdgeIndex];
+  const edges = edgeList(state.angle);
+  const { full, partial, pSpan } = getGapInfo();
+
+  // full opening edge
+  const open = edges[full];
   const nx=(open.b.y-open.a.y), ny=-(open.b.x-open.a.x); const nlen=Math.hypot(nx,ny); const onx=nx/nlen, ony=ny/nlen;
   const apothem=Math.abs(open.a.x*onx + open.a.y*ony);
-  const remain=[]; let redOut=false; let nonTargetOut=false;
+
+  // partial opening geometry
+  let pEdge=null, p_onx=0, p_ony=0, p_apothem=0, p_Ax=0, p_Ay=0, p_ABx=0, p_ABy=0, p_AB2=1;
+  if (partial !== null){
+    pEdge = edges[partial];
+    const pnx=(pEdge.b.y-pEdge.a.y), pny=-(pEdge.b.x-pEdge.a.x); const pnlen=Math.hypot(pnx,pny);
+    p_onx=pnx/pnlen; p_ony=pny/pnlen; p_apothem=Math.abs(pEdge.a.x*p_onx + pEdge.a.y*p_ony);
+    p_Ax=pEdge.a.x; p_Ay=pEdge.a.y; p_ABx=pEdge.b.x-pEdge.a.x; p_ABy=pEdge.b.y-pEdge.a.y; p_AB2=p_ABx*p_ABx + p_ABy*p_ABy;
+  }
+
+  const remain=[]; let redOut=false; let nonTargetOut=false; let duckOut=false;
+
   for(const b of state.balls){
-    const d=b.x*onx + b.y*ony; const outside = d > apothem + b.r;
-    if(outside){ if(b.type==='red') redOut=true; else nonTargetOut=true; }
+    let outside=false;
+    // full edge check
+    const d=b.x*onx + b.y*ony;
+    if (d > apothem + b.r) outside = true;
+
+    // partial segment check (only central span counts)
+    if (!outside && pEdge){
+      const APx = b.x - p_Ax, APy = b.y - p_Ay;
+      let tp = (APx*p_ABx + APy*p_ABy) / p_AB2; tp = Math.max(0, Math.min(1, tp));
+      const dd = b.x*p_onx + b.y*p_ony;
+      const outsidePartial = (tp >= pSpan[0] && tp <= pSpan[1]) && (dd > p_apothem + b.r);
+      if (outsidePartial) outside = true;
+    }
+
+    if(outside){ if(b.type==='red') redOut=true; else if (b.type==='duck') duckOut=true; else nonTargetOut=true; }
     else remain.push(b);
   }
+
+  // llama escape via main or partial opening
+  if (state.llama){
+    let outL=false;
+    const dL=state.llama.x*onx + state.llama.y*ony; if (dL > apothem + state.llama.r) outL=true;
+    if (!outL && pEdge){
+      const APx = state.llama.x - p_Ax, APy = state.llama.y - p_Ay;
+      let tp = (APx*p_ABx + APy*p_ABy) / p_AB2; tp = Math.max(0, Math.min(1, tp));
+      const dd = state.llama.x*p_onx + state.llama.y*p_ony;
+      if ((tp >= pSpan[0] && tp <= pSpan[1]) && (dd > p_apothem + state.llama.r)) outL=true;
+    }
+    if (outL) state.llama=null;
+  }
+
   if(redOut){
     playDing();
+    state.llama = null; // despawn llama on level-up
     state.balls = remain.filter(b=>b.type!=='red');
     state.score = Math.round(state.score + CFG.levelClearBonus);
     state.level++;
-    // add new red + one extra non-target
+    // award next level: add new red + one extra non-target
     const red=makeBall('red'); state.redBallId=red.id; state.balls.push(red); state.balls.push(makeBall('normal'));
+    // spawn duck if reaching duckLevel threshold
+    if (state.level >= CFG.duckLevel && !state.hasDuck){
+      state.hasDuck = true; state.balls.push(makeBall('duck')); playQuack();
+    }
+  } else if (duckOut){
+    state.balls = remain; state.lives -= CFG.bossLifeLoss; if(state.lives<=0) return gameOver();
   } else if (nonTargetOut){
     state.balls = remain; state.lives -= 1; if(state.lives<=0) return gameOver();
   }
@@ -261,17 +445,61 @@ function gameOver(){ state.running=false; startBtn.disabled=false; pauseBtn.disa
 // ======= RENDER =======
 function drawHex(angle){
   const edges=edgeList(angle); const c=CFG.colors; ctx.save(); ctx.translate(canvas.width/2,canvas.height/2);
+  const { full, partial, pSpan } = getGapInfo();
   // fill
   ctx.beginPath(); const v=getHexVertices(angle); ctx.moveTo(v[0].x,v[0].y); for(let i=1;i<6;i++) ctx.lineTo(v[i].x,v[i].y); ctx.closePath(); ctx.fillStyle='rgba(59,130,246,0.05)'; ctx.fill();
   // edges
-  for(const e of edges){ if(e.index===CFG.openEdgeIndex) continue; ctx.beginPath(); ctx.moveTo(e.a.x,e.a.y); ctx.lineTo(e.b.x,e.b.y); ctx.strokeStyle=c.edge; ctx.lineWidth=6; ctx.shadowColor=c.edgeGlow; ctx.shadowBlur=12; ctx.stroke(); }
-  // open edge dashed
-  const oe=edges[CFG.openEdgeIndex]; ctx.beginPath(); ctx.moveTo(oe.a.x,oe.a.y); ctx.lineTo(oe.b.x,oe.b.y); ctx.setLineDash([10,10]); ctx.strokeStyle='rgba(226,232,240,0.25)'; ctx.lineWidth=2; ctx.shadowBlur=0; ctx.stroke(); ctx.setLineDash([]);
+  for(const e of edges){
+    const Ax=e.a.x, Ay=e.a.y, Bx=e.b.x, By=e.b.y;
+    if(e.index===full) continue; // full open — guide below
+
+    if (partial !== null && e.index===partial){
+      const t0=pSpan[0], t1=pSpan[1];
+      const sx1=Ax, sy1=Ay;
+      const mx1=Ax + (Bx-Ax)*t0, my1=Ay + (By-Ay)*t0;
+      const mx2=Ax + (Bx-Ax)*t1, my2=Ay + (By-Ay)*t1;
+      const ex1=Bx, ey1=By;
+      ctx.beginPath(); ctx.moveTo(sx1, sy1); ctx.lineTo(mx1, my1);
+      ctx.strokeStyle=c.edge; ctx.lineWidth=6; ctx.shadowColor=c.edgeGlow; ctx.shadowBlur=12; ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(mx2, my2); ctx.lineTo(ex1, ey1);
+      ctx.strokeStyle=c.edge; ctx.lineWidth=6; ctx.shadowColor=c.edgeGlow; ctx.shadowBlur=12; ctx.stroke();
+      continue;
+    }
+
+    ctx.beginPath(); ctx.moveTo(Ax, Ay); ctx.lineTo(Bx, By);
+    ctx.strokeStyle=c.edge; ctx.lineWidth=6; ctx.shadowColor=c.edgeGlow; ctx.shadowBlur=12; ctx.stroke();
+  }
+
+  // Full open edge dashed
+  const oe=edges[full]; ctx.beginPath(); ctx.moveTo(oe.a.x,oe.a.y); ctx.lineTo(oe.b.x,oe.b.y); ctx.setLineDash([10,10]); ctx.strokeStyle='rgba(226,232,240,0.25)'; ctx.lineWidth=2; ctx.shadowBlur=0; ctx.stroke(); ctx.setLineDash([]);
+
+  // Partial gap dashed guide
+  if (partial !== null){
+    const pe=edges[partial]; const t0=pSpan[0], t1=pSpan[1];
+    const Ax=pe.a.x, Ay=pe.a.y, Bx=pe.b.x, By=pe.b.y;
+    const mx1=Ax+(Bx-Ax)*t0, my1=Ay+(By-Ay)*t0; const mx2=Ax+(Bx-Ax)*t1, my2=Ay+(By-Ay)*t1;
+    ctx.beginPath(); ctx.moveTo(mx1,my1); ctx.lineTo(mx2,my2);
+    ctx.setLineDash([6,8]); ctx.strokeStyle='rgba(226,232,240,0.25)'; ctx.lineWidth=2; ctx.stroke(); ctx.setLineDash([]);
+  }
+
   ctx.restore();
 }
 function drawBalls(){
   const c=CFG.colors; ctx.save(); ctx.translate(canvas.width/2,canvas.height/2);
+
+  // llama underlay
+  if (state.llama){
+    ctx.save();
+    const r=state.llama.r; ctx.font=`${Math.max(18, r*1.8)}px serif`; ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.shadowColor='#f0abfc'; ctx.shadowBlur=8; ctx.fillText('🦙', state.llama.x, state.llama.y);
+    ctx.restore();
+  }
+
   for(const b of state.balls){
+    if(b.type==='duck'){
+      ctx.save(); ctx.font=`${Math.max(18, b.r*2)}px serif`; ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.shadowColor='#fde047'; ctx.shadowBlur=10; ctx.fillText('🦆', b.x, b.y); ctx.restore();
+      continue;
+    }
     if(b.type==='red'){
       ctx.beginPath(); ctx.arc(b.x,b.y,b.r,0,Math.PI*2); ctx.fillStyle=c.red; ctx.globalAlpha=.2; ctx.fill(); ctx.globalAlpha=1; ctx.lineWidth=2; ctx.strokeStyle=c.redOutline; ctx.shadowColor=c.redOutline; ctx.shadowBlur=12; ctx.stroke();
     } else {
@@ -315,6 +543,15 @@ function layout(){
 window.addEventListener('resize', layout);
 window.addEventListener('orientationchange', ()=> setTimeout(layout, 250));
 layout();
+
+// ======= DEV SANITY TESTS =======
+(function tests(){
+  console.assert(typeof reflectWithNormal === 'function', 'reflectWithNormal should be a function');
+  console.assert(Array.isArray(CFG.redSpeedRange) && CFG.redSpeedRange.length===2, 'CFG.redSpeedRange must be [min,max]');
+  console.assert(Number.isInteger(CFG.duckLevel) && CFG.duckLevel>=1, 'CFG.duckLevel must be an integer ≥ 1');
+  console.assert(Array.isArray(CFG.partialGapSpan) && CFG.partialGapSpan.length===2 && CFG.partialGapSpan[0] < CFG.partialGapSpan[1], 'CFG.partialGapSpan must be [start,end] with start<end');
+})();
+
 // boot idle frame
 draw();
 </script>

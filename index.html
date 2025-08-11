@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
 <title>Hex Bouncer — Minimal Rebuild</title>
 <script>
 // =================== CONFIG ===================
@@ -37,9 +37,9 @@ const CFG = {
 </script>
 <style>
   :root { --ui: #e5e7eb; }
-  html, body { height: 100%; margin: 0; background:#0a0a0a; color:var(--ui); font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }
-  .wrap { min-height:100%; display:grid; place-items:center; gap:14px; padding:16px; }
-  canvas { width:min(92vmin,860px); height:min(92vmin,860px); background: radial-gradient(1200px at 50% 55%, #0f172a 0%, #0b0b0f 55%, #060608 100%); border-radius:14px; box-shadow:0 10px 40px rgba(0,0,0,.6), inset 0 0 60px rgba(0,0,0,.4); }
+  html, body { height: 100svh; margin: 0; background:#0a0a0a; color:var(--ui); font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; overflow:hidden; overscroll-behavior:none; }
+  .wrap { height:100%; display:grid; place-items:center; gap:14px; padding:16px; padding-bottom:calc(16px + env(safe-area-inset-bottom)); padding-top:calc(16px + env(safe-area-inset-top)); }
+  canvas { width:min(92vmin,860px); height:min(92vmin,860px); max-width:100%; max-height:100%; background: radial-gradient(1200px at 50% 55%, #0f172a 0%, #0b0b0f 55%, #060608 100%); border-radius:14px; box-shadow:0 10px 40px rgba(0,0,0,.6), inset 0 0 60px rgba(0,0,0,.4); }
   .frame{ width:min(92vmin,860px); }
   .topbar{ display:grid; grid-template-columns:1fr 1fr; gap:20px; align-items:center; justify-items:stretch; }
   .stats{ display:flex; justify-content:space-between; align-items:center; gap:12px; margin-top:6px; margin-bottom:6px; }
@@ -48,12 +48,15 @@ const CFG = {
   .btn.top{ padding:16px 0; font-size:clamp(18px,3.8vw,24px); }
   .btn:disabled{ opacity:.5; cursor:not-allowed; }
   .controls{ display:flex; justify-content:space-between; align-items:center; gap:12px; width:min(92vmin,860px); margin-top:14px; }
-  .arrow{ min-width:140px; min-height:110px; font-size:28px; user-select:none; -webkit-user-select:none; }
+  .arrow{ min-width:100px; min-height:80px; font-size:22px; user-select:none; -webkit-user-select:none; opacity:.5; }
   .arrow.active{ transform:translateY(1px) scale(0.98); }
+.title{ width:min(92vmin,860px); text-align:center; margin:8px 0 4px; font-size:clamp(20px,4.2vw,28px); font-weight:800; }
+  .controls-hint{ flex:1; text-align:center; font-weight:600; font-size:clamp(14px,3.6vw,18px); opacity:.9; }
 </style>
 </head>
 <body>
 <div class="wrap">
+  <h1 class="title frame">Welcome to Hex Bouncer</h1>
   <div class="topbar frame">
     <button class="btn top" id="startBtn">Start</button>
     <button class="btn top" id="resetBtn">Reset</button>
@@ -69,6 +72,7 @@ const CFG = {
 
   <div class="controls frame">
     <button class="btn arrow" id="leftBtn" aria-label="Rotate Left">◀</button>
+    <div class="controls-hint">Get only the red ball out of the hex</div>
     <button class="btn arrow" id="rightBtn" aria-label="Rotate Right">▶</button>
   </div>
 
@@ -288,10 +292,31 @@ function updateHud(){ scoreEl.textContent=`Score: ${Math.round(state.score)}`; l
 // ======= LOOP =======
 function loop(t){ if(!state.running||state.paused) return; const dtReal=Math.min(0.033,(t-state.lastFrame)/1000); state.lastFrame=t; let acc=dtReal; while(acc>1e-8){ const stepDt=Math.min(CFG.dt,acc); step(stepDt); acc-=stepDt; } draw(); requestAnimationFrame(loop); }
 
+// Responsive layout sizing
+function layout(){
+  const vw = window.innerWidth; const vh = window.innerHeight;
+  const padding = 32; // wrap horizontal padding
+  // Initial max width based on viewport
+  let maxW = Math.min(vw - padding, 860);
+  const frames = document.querySelectorAll('.frame');
+  frames.forEach(el => el.style.width = maxW + 'px');
+  const title = document.querySelector('.title');
+  const topbar = document.querySelector('.topbar');
+  const stats = document.querySelector('.stats');
+  const controls = document.querySelector('.controls');
+  const topH = (title?.offsetHeight||0) + (topbar?.offsetHeight||0) + (stats?.offsetHeight||0);
+  const bottomH = (controls?.offsetHeight||0);
+  const gaps = 14*3 + 8; // grid gaps + small buffer
+  const availH = vh - topH - bottomH - gaps - 16;
+  const target = Math.max(220, Math.min(maxW, availH));
+  canvas.style.width = canvas.style.height = target + 'px';
+  frames.forEach(el => el.style.width = target + 'px');
+}
+window.addEventListener('resize', layout);
+window.addEventListener('orientationchange', ()=> setTimeout(layout, 250));
+layout();
 // boot idle frame
 draw();
 </script>
 </body>
 </html>
-
-

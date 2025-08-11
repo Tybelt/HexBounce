@@ -1,0 +1,892 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<script>
+// =================== CONFIGURATION ===================
+const CFG = {
+  // Canvas & world
+  canvasSize: 900,
+  worldScale: 400,
+
+  // Gameplay
+  lives: 5,
+  levelClearBonus: 250,
+  openEdgeIndex: 0,           // Starting gap position (0–5)
+  lifeRewardEvery: 5,         // Gain life only every N levels
+  nonTargetLifeLoss: 1,
+  bossLifeLoss: 2,            // Lives lost when Duck Boss escapes
+  baseBalls: 3,
+  timeScoreRate: 3,
+  dt: 1/60,
+  maxInitTries: 300,
+  duckLevel: 5,
+
+  // Ball speeds & physics
+  speedMul: 1.25,             // Global speed multiplier
+  collisionSpeedBoost: 1.004, // Speed increase after collisions
+  duckSpeedMultiplier: 2.0,   // Boss base speed multiplier
+  duckBounceJitterDeg: 18,    // Boss bounce angle randomness
+  duckRestitutionBoost: 1.02, // Boss bounce speed boost
+
+  // Ball sizes & bounce
+  targetBallSizeRange: [12, 18],    // radius (px)
+  nonTargetBallSizeRange: [10, 25], // radius (px)
+  duckBallSizeRange: [15, 22],      // radius (px)
+  ballBounceRange: [0.82, 0.98],    // elasticity for normal balls
+  redBounce: 0.96,
+  duckBaseBounce: 0.98,
+
+  // Gaps
+  partialGapSpan: [0.25, 0.75],  // 50% central half-gap
+  smallGapSpan: [0.4, 0.6],      // 20% small gap every milestone
+
+  // Llama character
+  llamaEnabled: true,
+  llamaScoreInterval: 500,       // spawn when score hits multiples of this
+  llamaLifetimeSec: 10,
+  llamaRadius: 24,
+  llamaSpeed: 220,               // target move speed (px/s)
+  llamaAccel: 600,               // steering accel toward target (px/s^2)
+  llamaCollidesWalls: true,
+  llamaEmoji: true               // render with emoji 🦙
+};
+// ======================================================
+
+// --- Dev sanity checks (lightweight test cases) ---
+(function configTests(C){
+  console.assert(Number.isInteger(C.duckLevel) && C.duckLevel >= 1, 'CFG.duckLevel must be an integer ≥ 1');
+  console.assert(Array.isArray(C.targetBallSizeRange) && C.targetBallSizeRange.length === 2 && C.targetBallSizeRange[0] < C.targetBallSizeRange[1], 'CFG.targetBallSizeRange must be [min,max]');
+  console.assert(Array.isArray(C.nonTargetBallSizeRange) && C.nonTargetBallSizeRange.length === 2 && C.nonTargetBallSizeRange[0] < C.nonTargetBallSizeRange[1], 'CFG.nonTargetBallSizeRange must be [min,max]');
+  console.assert(Array.isArray(C.duckBallSizeRange) && C.duckBallSizeRange.length === 2 && C.duckBallSizeRange[0] < C.duckBallSizeRange[1], 'CFG.duckBallSizeRange must be [min,max]');
+  console.assert(Array.isArray(C.partialGapSpan) && C.partialGapSpan[0] < C.partialGapSpan[1], 'CFG.partialGapSpan must be [start,end] with start<end');
+  console.assert(Array.isArray(C.smallGapSpan) && C.smallGapSpan[0] < C.smallGapSpan[1], 'CFG.smallGapSpan must be [start,end] with start<end');
+  console.assert(Number.isFinite(C.speedMul) && C.speedMul > 0, 'CFG.speedMul must be > 0');
+  console.assert(Number.isInteger(C.lifeRewardEvery) && C.lifeRewardEvery >= 1, 'CFG.lifeRewardEvery must be an integer ≥ 1');
+  console.assert(Number.isInteger(C.llamaScoreInterval) && C.llamaScoreInterval > 0, 'CFG.llamaScoreInterval must be a positive integer');
+})(CFG);
+</script>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Hex Bouncer</title>
+<style>
+  :root {
+    --bg: #0a0a0a;
+    --ui: #e4e4e7;
+    --accent: #7dd3fc;
+    --good: #34d399;
+    --warn: #fbbf24;
+    --bad: #fb7185;
+    --red: #ef4444;
+    --duck: #fde047; /* yellow */
+  }
+  html, body { height: 100%; margin: 0; background: var(--bg); color: var(--ui); font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }
+  .wrap { display: grid; place-items: center; height: 100%; gap: 14px; }
+  canvas { width: min(92vmin, 860px); height: min(92vmin, 860px); background: radial-gradient(1200px at 50% 55%, #0f172a 0%, #0b0b0f 55%, #060608 100%); border-radius: 14px; box-shadow: 0 10px 40px rgba(0,0,0,.6), inset 0 0 60px rgba(0,0,0,.4); }
+  .hud { display:flex; gap:16px; align-items:center; flex-wrap:wrap; justify-content:center; }
+  .pill { padding: 8px 12px; border-radius:999px; background:#11131a; border:1px solid #1f2937; font-weight:600 }
+  .score { color: var(--good); }
+  .lives { color: var(--warn); }
+  .level { color: var(--accent); }
+  .btn { cursor:pointer; border:none; background:linear-gradient(180deg,#38bdf8,#0ea5e9); color:white; font-weight:700; padding:10px 14px; border-radius:10px; box-shadow: 0 8px 18px rgba(56,189,248,.35); }
+  .btn:disabled { opacity:.5; cursor:not-allowed; }
+  .help { max-width: 880px; line-height:1.4; opacity:.92; text-align:center; font-size:14px; color:#cbd5e1 }
+  .help kbd { background:#111827; border:1px solid #1f2937; padding:.1em .45em; border-radius:6px; color:#e5e7eb; }
+  .toast { position: fixed; inset: 16px 16px auto auto; background:#0f172a; border:1px solid #1f2937; padding:10px 12px; border-radius:10px; font-size:13px; color:#c7d2fe; display:none;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <canvas id="game" width="900" height="900"></canvas>
+  <div class="hud">
+    <span class="pill score" id="score">Score: 0</span>
+    <span class="pill lives" id="lives">Lives: 5</span>
+    <span class="pill level" id="level">Level: 1</span>
+    <button class="btn" id="startBtn">Start</button>
+    <button class="btn" id="pauseBtn" disabled>Pause</button>
+    <button class="btn" id="resetBtn">Reset</button>
+  </div>
+  <div class="help">
+    <strong>HEX BOUNCER — Directions (v5)</strong><br/>
+    Rotate the hexagon with <kbd>←</kbd>/<kbd>→</kbd>. Get the <span style="color:var(--red);font-weight:700">red ball</span> out through the open edge to win the level.
+    If any other ball escapes, you <em>lose exactly one life</em> per escape event (boss duck costs <b>−2 lives</b>). Balls bounce off walls and <b>each collision gives a slight speed boost</b>.<br/>
+    You gain <b>+1 life only every 5 levels</b> (5, 10, 15, ...). At <b>Level 5+</b>, a <b>🦆 Duck Boss</b> appears; every 5 levels, a new <b>half-size gap</b> and a <b>small gap</b> open on different edges. A <b>🦙 Llama</b> appears for 10s whenever score hits a multiple of 500 and chases the red ball.
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+// ======= STATE =======
+const state = {
+  running: false,
+  paused: false,
+  angle: 0,
+  score: 0,
+  lives: CFG.lives,
+  level: 1,
+  balls: [],
+  redBallId: null,
+  hasDuck: false,
+  llama: null,              // {x,y,vx,vy,r,ttl}
+  nextLlamaAt: CFG.llamaScoreInterval,
+  lastFrame: 0,
+};
+
+// ======= SETUP =======
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const scoreEl = document.getElementById('score');
+const livesEl = document.getElementById('lives');
+const levelEl = document.getElementById('level');
+const startBtn = document.getElementById('startBtn');
+const pauseBtn = document.getElementById('pauseBtn');
+const resetBtn = document.getElementById('resetBtn');
+const toast = document.getElementById('toast');
+
+// ======= AUDIO =======
+let audioCtx = null;
+function ensureAudio(){
+  if (!audioCtx) {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    audioCtx = new AC();
+  }
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+}
+function beep(freq=600, dur=0.08, type='sine', vol=0.06){
+  if (!audioCtx) return;
+  const now = audioCtx.currentTime;
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.type = type; osc.frequency.setValueAtTime(freq, now);
+  gain.gain.setValueAtTime(0, now);
+  gain.gain.linearRampToValueAtTime(vol, now + 0.005);
+  gain.gain.exponentialRampToValueAtTime(0.0001, now + dur);
+  osc.connect(gain).connect(audioCtx.destination);
+  osc.start(now);
+  osc.stop(now + dur + 0.02);
+}
+function playBounce(){
+  beep(520, 0.06, 'square', 0.05);
+}
+function playDing(){
+  beep(880, 0.12, 'sine', 0.06);
+  setTimeout(()=>beep(1320, 0.10, 'sine', 0.05), 60);
+}
+function playWay(){ // llama spawn sound
+  beep(660, 0.10, 'sine', 0.07);
+  setTimeout(()=>beep(990, 0.08, 'sine', 0.06), 80);
+}
+function playQuack(){ // duck enters
+  beep(220, 0.09, 'square', 0.06);
+  setTimeout(()=>beep(300, 0.08, 'square', 0.05), 70);
+}
+
+function showToast(msg, ms=1500) {
+  toast.textContent = msg;
+  toast.style.display = 'block';
+  setTimeout(()=> toast.style.display = 'none', ms);
+}
+
+// Regular hex centered at origin, radius = CFG.worldScale
+function getHexVertices(angle=0) {
+  const R = CFG.worldScale;
+  const verts = [];
+  for (let i = 0; i < 6; i++) {
+    const a = angle + Math.PI/6 + i * Math.PI/3; // flat-top orientation
+    verts.push({ x: R * Math.cos(a), y: R * Math.sin(a) });
+  }
+  return verts;
+}
+
+function edgeList(angle=0) {
+  const v = getHexVertices(angle);
+  const edges = [];
+  for (let i = 0; i < 6; i++) {
+    const a = v[i], b = v[(i+1)%6];
+    edges.push({ a, b, index: i });
+  }
+  return edges;
+}
+
+function getGapInfo(){
+  const full = CFG.openEdgeIndex;
+  const tiers = Math.floor((state.level-1)/5); // 0 for 1-4, 1 for 5-9, etc.
+  let partial = null, small = null;
+  if (tiers > 0) {
+    partial = (1 + tiers) % 6; // rotate around, avoid 0 initially
+    if (partial === full) partial = (partial + 1) % 6;
+    small = (2 + tiers) % 6;
+    if (small === full || small === partial) small = (small + 1) % 6;
+  }
+  return { full, partial, small, pSpan: CFG.partialGapSpan, sSpan: CFG.smallGapSpan };
+}
+
+function rand(min,max){ return Math.random()*(max-min)+min; }
+function pick(arr){ return arr[(Math.random()*arr.length)|0]; }
+
+function resetGame() {
+  state.running = false;
+  state.paused = false;
+  state.angle = 0;
+  state.score = 0;
+  state.lives = CFG.lives;
+  state.level = 1;
+  state.balls = [];
+  state.hasDuck = false;
+  state.llama = null; state.nextLlamaAt = CFG.llamaScoreInterval;
+  addStartingBalls();
+  updateHud();
+  draw();
+}
+
+function addStartingBalls() {
+  const red = makeBall({ type:'red' });
+  state.redBallId = red.id;
+  state.balls.push(red);
+  for (let i=0;i<CFG.baseBalls;i++) state.balls.push(makeBall({ type:'normal' }));
+}
+
+let nextBallId = 1;
+function makeBall(opts={}) {
+  const type = opts.type || 'normal'; // 'red' | 'normal' | 'duck'
+  const id = nextBallId++;
+
+  // Base parameters
+  let radius, speed, bounce, color, outline;
+  if (type === 'red') {
+    radius = rand(CFG.targetBallSizeRange[0], CFG.targetBallSizeRange[1]);
+    speed = rand(110,170) * CFG.speedMul;
+    bounce = CFG.redBounce;
+    color = '#ef4444';
+    outline = '#fca5a5';
+  } else if (type === 'duck') {
+    const redBaseline = rand(110,170);
+    speed = redBaseline * CFG.duckSpeedMultiplier * CFG.speedMul;
+    radius = rand(CFG.duckBallSizeRange[0], CFG.duckBallSizeRange[1]); // slightly larger
+    bounce = CFG.duckBaseBounce; // base, gets boosted on collision
+    color = 'var(--duck)';
+    outline = '#facc15';
+  } else { // normal
+    radius = rand(CFG.nonTargetBallSizeRange[0], CFG.nonTargetBallSizeRange[1]);
+    speed = rand(90,210) * CFG.speedMul;
+    bounce = rand(CFG.ballBounceRange[0], CFG.ballBounceRange[1]);
+    color = '#93c5fd';
+    outline = '#60a5fa';
+  }
+
+  // place roughly near center without overlap
+  let pos = {x:0, y:0}, tries=0;
+  do {
+    tries++;
+    const r = rand(0, CFG.worldScale * 0.45);
+    const th = rand(0, Math.PI*2);
+    pos = { x: r*Math.cos(th), y: r*Math.sin(th) };
+  } while (overlapsAny(pos, radius) && tries < CFG.maxInitTries);
+
+  const dir = rand(0, Math.PI*2);
+  return {
+    id, type,
+    x: pos.x, y: pos.y,
+    vx: speed*Math.cos(dir), vy: speed*Math.sin(dir),
+    r: radius,
+    bounce,
+    color, outline
+  };
+}
+
+function overlapsAny(p, rad) {
+  return state.balls.some(b => {
+    const dx = p.x - b.x, dy = p.y - b.y;
+    return Math.hypot(dx,dy) < (rad + b.r + 4);
+  });
+}
+
+// ======= INPUT =======
+const keys = new Set();
+window.addEventListener('keydown', (e)=>{
+  if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') { e.preventDefault(); keys.add(e.key); }
+  if (e.key === ' ' && state.running) { togglePause(); }
+});
+window.addEventListener('keyup', (e)=>{
+  if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') keys.delete(e.key);
+});
+
+startBtn.onclick = ()=>{
+  if (!state.running) {
+    ensureAudio();
+    state.running = true;
+    startBtn.disabled = true;
+    pauseBtn.disabled = false;
+    state.lastFrame = performance.now();
+    showToast('Level 1 — Good luck!');
+    loop(state.lastFrame);
+  }
+};
+
+pauseBtn.onclick = togglePause;
+resetBtn.onclick = ()=>{ startBtn.disabled = false; pauseBtn.disabled = true; resetGame(); };
+
+function togglePause(){
+  if (!state.running) return;
+  state.paused = !state.paused;
+  pauseBtn.textContent = state.paused ? 'Resume' : 'Pause';
+  if (!state.paused) {
+    state.lastFrame = performance.now();
+    loop(state.lastFrame);
+  }
+}
+
+// ======= GAME LOOP =======
+function loop(t) {
+  if (!state.running || state.paused) return;
+  const dtReal = Math.min(0.033, (t - state.lastFrame) / 1000);
+  state.lastFrame = t;
+
+  // Fixed-step integration for consistent physics
+  let acc = dtReal;
+  while (acc > 1e-8) {
+    const step = Math.min(CFG.dt, acc);
+    stepUpdate(step);
+    acc -= step;
+  }
+  draw();
+  requestAnimationFrame(loop);
+}
+
+function stepUpdate(dt) {
+  // rotate based on input — do NOT alter ball velocities
+  const rotSpeed = 1.8; // radians/sec
+  if (keys.has('ArrowLeft'))  state.angle -= rotSpeed * dt;
+  if (keys.has('ArrowRight')) state.angle += rotSpeed * dt;
+
+  // advance balls
+  for (const b of state.balls) {
+    b.x += b.vx * dt;
+    b.y += b.vy * dt;
+  }
+
+  // update llama movement & lifetime
+  updateLlama(dt);
+
+  // ball-ball collisions (elastic-ish, mass ~ r^2)
+  handleBallCollisions();
+
+  // collisions with rotating hex
+  handleHexCollisions(dt);
+
+  // scoring over time
+  state.score += CFG.timeScoreRate * dt;
+
+  // llama spawn check after score update
+  maybeSpawnLlama();
+
+  // check escapes through open edges
+  checkEscapes();
+}
+
+function reflectWithNormal(b, nx, ny) {
+  const vdotn = b.vx*nx + b.vy*ny;
+  if (vdotn < 0) {
+    const restitution = (b.type === 'duck') ? b.bounce * CFG.duckRestitutionBoost : b.bounce;
+    b.vx -= (1 + restitution) * vdotn * nx;
+    b.vy -= (1 + restitution) * vdotn * ny;
+    if (b.type === 'duck') {
+      const jitter = (CFG.duckBounceJitterDeg * Math.PI/180) * (Math.random()*2 - 1);
+      const sp = Math.hypot(b.vx,b.vy);
+      const ang = Math.atan2(b.vy, b.vx) + jitter;
+      b.vx = sp * Math.cos(ang);
+      b.vy = sp * Math.sin(ang);
+    }
+    // global speed boost on wall collision
+    b.vx *= CFG.collisionSpeedBoost;
+    b.vy *= CFG.collisionSpeedBoost;
+    if (b.type === 'red') playBounce();
+  }
+}
+
+function handleBallCollisions(){
+  const n = state.balls.length;
+  for (let i=0;i<n;i++){
+    for (let j=i+1;j<n;j++){
+      const a = state.balls[i], b = state.balls[j];
+      const dx = b.x - a.x, dy = b.y - a.y;
+      const dist = Math.hypot(dx,dy);
+      const minDist = a.r + b.r;
+      if (dist > 0 && dist < minDist){
+        // masses ~ area to give bigger balls more momentum
+        const ma = a.r * a.r;
+        const mb = b.r * b.r;
+        const nx = dx / dist, ny = dy / dist;
+
+        // separate overlap proportionally to masses
+        const overlap = (minDist - dist) + 0.01;
+        const invMass = 1/(ma+mb);
+        a.x -= nx * overlap * (mb * invMass);
+        a.y -= ny * overlap * (mb * invMass);
+        b.x += nx * overlap * (ma * invMass);
+        b.y += ny * overlap * (ma * invMass);
+
+        // relative velocity along normal
+        const rvx = b.vx - a.vx, rvy = b.vy - a.vy;
+        const vrel = rvx*nx + rvy*ny;
+        if (vrel < 0){
+          const e = Math.min(a.bounce, b.bounce);
+          const jImpulse = -(1+e) * vrel / (1/ma + 1/mb);
+          const jx = jImpulse * nx, jy = jImpulse * ny;
+          a.vx -= jx / ma; a.vy -= jy / ma;
+          b.vx += jx / mb; b.vy += jy / mb;
+
+          // speed boost after ball collision
+          a.vx *= CFG.collisionSpeedBoost; a.vy *= CFG.collisionSpeedBoost;
+          b.vx *= CFG.collisionSpeedBoost; b.vy *= CFG.collisionSpeedBoost;
+        }
+      }
+    }
+  }
+}
+
+function handleHexCollisions(dt) {
+  const edges = edgeList(state.angle);
+  const { full, partial, small, pSpan, sSpan } = getGapInfo();
+  // balls
+  for (const b of state.balls) collideEntityWithEdges(b, edges, full, partial, small, pSpan, sSpan);
+  // llama
+  if (state.llama && CFG.llamaCollidesWalls) collideEntityWithEdges(state.llama, edges, full, partial, small, pSpan, sSpan);
+}
+
+function collideEntityWithEdges(ent, edges, full, partial, small, pSpan, sSpan){
+  for (const e of edges) {
+    // Line segment AB, compute nearest point and push out
+    const Ax = e.a.x, Ay = e.a.y, Bx = e.b.x, By = e.b.y;
+    const ABx = Bx - Ax, ABy = By - Ay;
+    const APx = ent.x - Ax, APy = ent.y - Ay;
+    const AB2 = ABx*ABx + ABy*ABy;
+    let t = (APx*ABx + APy*ABy) / AB2; t = Math.max(0, Math.min(1, t));
+
+    // open edges
+    const isFullOpen = (e.index === full);
+    const isPartialOpen = (partial !== null && e.index === partial && t >= pSpan[0] && t <= pSpan[1]);
+    const isSmallOpen = (small !== null && e.index === small && t >= sSpan[0] && t <= sSpan[1]);
+    if (isFullOpen || isPartialOpen || isSmallOpen) continue;
+
+    const Qx = Ax + t*ABx, Qy = Ay + t*ABy;
+    const dx = ent.x - Qx, dy = ent.y - Qy;
+    const dist = Math.hypot(dx,dy);
+
+    const r = ent.r || 0;
+    if (dist < r) {
+      const nx = dx / (dist || 1e-6);
+      const ny = dy / (dist || 1e-6);
+      const overlap = r - dist + 0.01;
+      ent.x += nx * overlap; ent.y += ny * overlap;
+      // reflect for balls; for llama use mild restitution
+      if (ent.type) {
+        reflectWithNormal(ent, nx, ny);
+      } else { // llama (no type)
+        const bnc = 0.9;
+        const vdotn = (ent.vx||0)*nx + (ent.vy||0)*ny;
+        if (vdotn < 0){
+          ent.vx -= (1 + bnc) * vdotn * nx;
+          ent.vy -= (1 + bnc) * vdotn * ny;
+        }
+      }
+    }
+  }
+}
+
+function updateLlama(dt){
+  // Countdown & homing
+  if (state.llama){
+    state.llama.ttl -= dt;
+    // homing towards red ball center
+    const red = state.balls.find(b=>b.id===state.redBallId);
+    if (red){
+      const dx = red.x - state.llama.x;
+      const dy = red.y - state.llama.y;
+      const dist = Math.hypot(dx,dy) || 1;
+      // desired velocity toward target
+      const desiredVx = (dx / dist) * CFG.llamaSpeed;
+      const desiredVy = (dy / dist) * CFG.llamaSpeed;
+      // steer with accel limit
+      const ax = (desiredVx - (state.llama.vx||0));
+      const ay = (desiredVy - (state.llama.vy||0));
+      const alen = Math.hypot(ax,ay) || 1;
+      const maxDv = CFG.llamaAccel * dt;
+      const scale = Math.min(1, maxDv / alen);
+      state.llama.vx = (state.llama.vx||0) + ax * scale;
+      state.llama.vy = (state.llama.vy||0) + ay * scale;
+    }
+    // integrate
+    state.llama.x += (state.llama.vx||0) * dt;
+    state.llama.y += (state.llama.vy||0) * dt;
+    if (state.llama.ttl <= 0) state.llama = null;
+  }
+}
+
+function maybeSpawnLlama(){
+  if (!CFG.llamaEnabled) return;
+  if (state.llama) return; // only one at a time
+  if (Math.floor(state.score) >= state.nextLlamaAt){
+    // spawn near edge of center with gentle random heading
+    const r = CFG.llamaRadius;
+    state.llama = { x: rand(-60,60), y: rand(-60,60), vx: 0, vy: 0, r, ttl: CFG.llamaLifetimeSec };
+    state.nextLlamaAt += CFG.llamaScoreInterval;
+    playWay();
+    showToast('🦙 Llama appears! 10s', 900);
+  }
+}
+
+function handleHexCollisionsForEscapesSetup(edge){
+  const nx = (edge.b.y - edge.a.y);
+  const ny = -(edge.b.x - edge.a.x);
+  const nlen = Math.hypot(nx,ny);
+  return { onx: nx / nlen, ony: ny / nlen, apothem: Math.abs(edge.a.x*(nx/nlen) + edge.a.y*(ny/nlen)) };
+}
+
+function checkEscapes() {
+  const edges = edgeList(state.angle);
+  const { full, partial, small, pSpan, sSpan } = getGapInfo();
+
+  // full opening edge
+  const open = edges[full];
+  const nx = (open.b.y - open.a.y);
+  const ny = -(open.b.x - open.a.x);
+  const nlen = Math.hypot(nx,ny);
+  const onx = nx / nlen, ony = ny / nlen; // outward normal
+  const apothem = Math.abs((open.a.x*onx + open.a.y*ony));
+
+  // partial edges geometry
+  let pEdge = null, p_onx=0, p_ony=0, p_apothem=0, p_Ax=0, p_Ay=0, p_ABx=0, p_ABy=0, p_AB2=1;
+  if (partial !== null) {
+    pEdge = edges[partial];
+    const pnx = (pEdge.b.y - pEdge.a.y);
+    const pny = -(pEdge.b.x - pEdge.a.x);
+    const pnlen = Math.hypot(pnx,pny);
+    p_onx = pnx / pnlen; p_ony = pny / pnlen;
+    p_apothem = Math.abs((pEdge.a.x*p_onx + pEdge.a.y*p_ony));
+    p_Ax = pEdge.a.x; p_Ay = pEdge.a.y;
+    p_ABx = pEdge.b.x - pEdge.a.x; p_ABy = pEdge.b.y - pEdge.a.y;
+    p_AB2 = p_ABx*p_ABx + p_ABy*p_ABy;
+  }
+
+  let sEdge = null, s_onx=0, s_ony=0, s_apothem=0, s_Ax=0, s_Ay=0, s_ABx=0, s_ABy=0, s_AB2=1;
+  if (small !== null) {
+    sEdge = edges[small];
+    const snx = (sEdge.b.y - sEdge.a.y);
+    const sny = -(sEdge.b.x - sEdge.a.x);
+    const snlen = Math.hypot(snx,sny);
+    s_onx = snx / snlen; s_ony = sny / snlen;
+    s_apothem = Math.abs((sEdge.a.x*s_onx + sEdge.a.y*s_ony));
+    s_Ax = sEdge.a.x; s_Ay = sEdge.a.y;
+    s_ABx = sEdge.b.x - sEdge.a.x; s_ABy = sEdge.b.y - sEdge.a.y;
+    s_AB2 = s_ABx*s_ABx + s_ABy*s_ABy;
+  }
+
+  const remaining = [];
+  let redEscaped = false; 
+  let duckEscaped = false;
+  let nonTargetEscaped = false; // event flags
+  let llamaEscaped = false;
+
+  // balls escape
+  for (const b of state.balls) {
+    // main open edge check (full length)
+    const d = b.x*onx + b.y*ony;
+    let outside = d > apothem + b.r;
+
+    // partial edge check (requires central span)
+    if (!outside && pEdge) {
+      const APx = b.x - p_Ax, APy = b.y - p_Ay;
+      let tp = (APx*p_ABx + APy*p_ABy) / p_AB2; tp = Math.max(0, Math.min(1, tp));
+      const dd = b.x*p_onx + b.y*p_ony;
+      const outsidePartial = (tp >= pSpan[0] && tp <= pSpan[1]) && (dd > p_apothem + b.r);
+      if (outsidePartial) outside = true;
+    }
+
+    // small edge check
+    if (!outside && sEdge) {
+      const APx2 = b.x - s_Ax, APy2 = b.y - s_Ay;
+      let ts = (APx2*s_ABx + APy2*s_ABy) / s_AB2; ts = Math.max(0, Math.min(1, ts));
+      const dd2 = b.x*s_onx + b.y*s_ony;
+      const outsideSmall = (ts >= sSpan[0] && ts <= sSpan[1]) && (dd2 > s_apothem + b.r);
+      if (outsideSmall) outside = true;
+    }
+
+    if (outside) {
+      if (b.type === 'red') redEscaped = true;
+      else if (b.type === 'duck') duckEscaped = true;
+      else nonTargetEscaped = true;
+    } else {
+      remaining.push(b);
+    }
+  }
+
+  // llama escape
+  if (state.llama){
+    // Only through gaps
+    const dL = state.llama.x*onx + state.llama.y*ony;
+    let outsideL = dL > apothem + state.llama.r;
+    if (!outsideL && pEdge){
+      const APx = state.llama.x - p_Ax, APy = state.llama.y - p_Ay;
+      let tp = (APx*p_ABx + APy*p_ABy) / p_AB2; tp = Math.max(0, Math.min(1, tp));
+      const dd = state.llama.x*p_onx + state.llama.y*p_ony;
+      const outsidePartial = (tp >= pSpan[0] && tp <= pSpan[1]) && (dd > p_apothem + state.llama.r);
+      if (outsidePartial) outsideL = true;
+    }
+    if (!outsideL && sEdge){
+      const APx2 = state.llama.x - s_Ax, APy2 = state.llama.y - s_Ay;
+      let ts = (APx2*s_ABx + APy2*s_ABy) / s_AB2; ts = Math.max(0, Math.min(1, ts));
+      const dd2 = state.llama.x*s_onx + state.llama.y*s_ony;
+      const outsideSmall = (ts >= sSpan[0] && ts <= sSpan[1]) && (dd2 > s_apothem + state.llama.r);
+      if (outsideSmall) outsideL = true;
+    }
+    if (outsideL) llamaEscaped = true;
+  }
+
+  if (redEscaped) {
+    // Level cleared
+    playDing();
+    state.llama = null; // llama despawns on level-up
+    state.balls = remaining.filter(b=>b.type !== 'red');
+    state.score = Math.round(state.score + CFG.levelClearBonus);
+    state.level++;
+    levelEl.textContent = `Level: ${state.level}`;
+
+    // +1 life only every N levels
+    if (state.level % CFG.lifeRewardEvery === 0) {
+      state.lives++;
+      livesEl.textContent = `Lives: ${state.lives}`;
+      showToast('Next level! +1 life + new ball', 1200);
+    } else {
+      showToast('Next level! + new ball', 1200);
+    }
+
+    // re-add target ball and one new random ball
+    const red = makeBall({ type:'red' });
+    state.redBallId = red.id;
+    state.balls.push(red);
+    state.balls.push(makeBall({ type:'normal' }));
+
+    // Spawn Duck Boss starting at level 5; persist afterwards
+    if (state.level >= CFG.duckLevel && !state.hasDuck) {
+      state.balls.push(makeBall({ type:'duck' }));
+      state.hasDuck = true;
+      playQuack();
+      showToast('🦆 Duck Boss enters!', 1400);
+    }
+  } else if (duckEscaped) {
+    state.balls = remaining;
+    state.lives -= CFG.bossLifeLoss; // boss costs two lives
+    livesEl.textContent = `Lives: ${state.lives}`;
+    showToast('Duck Boss escaped! −2 lives', 1400);
+    if (state.lives <= 0) gameOver();
+  } else if (nonTargetEscaped) {
+    // Only ONE life lost per event, even if multiple escape in the same frame
+    state.balls = remaining; // remove the escaper(s) so it doesn't drain lives next frame
+    state.lives -= CFG.nonTargetLifeLoss;
+    livesEl.textContent = `Lives: ${state.lives}`;
+    showToast('A non-target escaped! −1 life', 1200);
+    if (state.lives <= 0) gameOver();
+  }
+
+  if (llamaEscaped) state.llama = null; // no special effect
+
+  updateHud();
+}
+
+function gameOver() {
+  state.running = false;
+  startBtn.disabled = false;
+  pauseBtn.disabled = true;
+  showToast(`Game Over — Final Score: ${Math.round(state.score)}`, 2500);
+}
+
+function updateHud() {
+  scoreEl.textContent = `Score: ${Math.round(state.score)}`;
+  livesEl.textContent = `Lives: ${state.lives}`;
+  levelEl.textContent = `Level: ${state.level}`;
+}
+
+// ======= RENDER =======
+function drawHex(angle) {
+  const edges = edgeList(angle);
+  const { full, partial, small, pSpan, sSpan } = getGapInfo();
+  ctx.save();
+  ctx.translate(canvas.width/2, canvas.height/2);
+
+  // Hex fill glow
+  ctx.beginPath();
+  const verts = getHexVertices(angle);
+  ctx.moveTo(verts[0].x, verts[0].y);
+  for (let i=1;i<6;i++) ctx.lineTo(verts[i].x, verts[i].y);
+  ctx.closePath();
+  ctx.fillStyle = 'rgba(59,130,246,0.05)';
+  ctx.fill();
+
+  // Edges with one open (full) and optional partial gaps
+  for (const e of edges) {
+    const Ax = e.a.x, Ay = e.a.y, Bx = e.b.x, By = e.b.y;
+    if (e.index === full) continue; // full open — draw dashed guide below
+
+    // If this is a partial-edge, draw two solid stubs (0..span[0]) and (span[1]..1)
+    if (partial !== null && e.index === partial) {
+      const t0 = pSpan[0], t1 = pSpan[1];
+      const sx1 = Ax, sy1 = Ay;
+      const mx1 = Ax + (Bx - Ax)*t0, my1 = Ay + (By - Ay)*t0;
+      const mx2 = Ax + (Bx - Ax)*t1, my2 = Ay + (By - Ay)*t1;
+      const ex1 = Bx, ey1 = By;
+
+      ctx.beginPath(); ctx.moveTo(sx1, sy1); ctx.lineTo(mx1, my1);
+      ctx.strokeStyle = '#38bdf8'; ctx.lineWidth = 6; ctx.shadowColor = '#22d3ee'; ctx.shadowBlur = 12; ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(mx2, my2); ctx.lineTo(ex1, ey1);
+      ctx.strokeStyle = '#38bdf8'; ctx.lineWidth = 6; ctx.shadowColor = '#22d3ee'; ctx.shadowBlur = 12; ctx.stroke();
+      continue;
+    }
+
+    if (small !== null && e.index === small) {
+      const t0 = sSpan[0], t1 = sSpan[1];
+      const sx1 = Ax, sy1 = Ay;
+      const mx1 = Ax + (Bx - Ax)*t0, my1 = Ay + (By - Ay)*t0;
+      const mx2 = Ax + (Bx - Ax)*t1, my2 = Ay + (By - Ay)*t1;
+      const ex1 = Bx, ey1 = By;
+
+      ctx.beginPath(); ctx.moveTo(sx1, sy1); ctx.lineTo(mx1, my1);
+      ctx.strokeStyle = '#38bdf8'; ctx.lineWidth = 6; ctx.shadowColor = '#22d3ee'; ctx.shadowBlur = 12; ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(mx2, my2); ctx.lineTo(ex1, ey1);
+      ctx.strokeStyle = '#38bdf8'; ctx.lineWidth = 6; ctx.shadowColor = '#22d3ee'; ctx.shadowBlur = 12; ctx.stroke();
+      continue;
+    }
+
+    // normal closed edge
+    ctx.beginPath();
+    ctx.moveTo(Ax, Ay);
+    ctx.lineTo(Bx, By);
+    ctx.strokeStyle = '#38bdf8';
+    ctx.lineWidth = 6;
+    ctx.shadowColor = '#22d3ee';
+    ctx.shadowBlur = 12;
+    ctx.stroke();
+  }
+
+  // Full open edge dashed guide
+  const oe = edges[full];
+  ctx.beginPath();
+  ctx.moveTo(oe.a.x, oe.a.y);
+  ctx.lineTo(oe.b.x, oe.b.y);
+  ctx.setLineDash([10, 10]);
+  ctx.strokeStyle = 'rgba(226,232,240,0.25)';
+  ctx.lineWidth = 2;
+  ctx.shadowBlur = 0;
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Partial gap dashed guides
+  if (partial !== null) {
+    const pe = edges[partial];
+    const t0 = pSpan[0], t1 = pSpan[1];
+    const Ax = pe.a.x, Ay = pe.a.y, Bx = pe.b.x, By = pe.b.y;
+    const mx1 = Ax + (Bx - Ax)*t0, my1 = Ay + (By - Ay)*t0;
+    const mx2 = Ax + (Bx - Ax)*t1, my2 = Ay + (By - Ay)*t1;
+    ctx.beginPath();
+    ctx.moveTo(mx1, my1);
+    ctx.lineTo(mx2, my2);
+    ctx.setLineDash([6, 8]);
+    ctx.strokeStyle = 'rgba(226,232,240,0.25)';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  if (small !== null) {
+    const se = edges[small];
+    const t0s = sSpan[0], t1s = sSpan[1];
+    const Ax = se.a.x, Ay = se.a.y, Bx = se.b.x, By = se.b.y;
+    const mx1s = Ax + (Bx - Ax)*t0s, my1s = Ay + (By - Ay)*t0s;
+    const mx2s = Ax + (Bx - Ax)*t1s, my2s = Ay + (By - Ay)*t1s;
+    ctx.beginPath();
+    ctx.moveTo(mx1s, my1s);
+    ctx.lineTo(mx2s, my2s);
+    ctx.setLineDash([4, 10]);
+    ctx.strokeStyle = 'rgba(226,232,240,0.22)';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  ctx.restore();
+}
+
+function drawBalls() {
+  ctx.save();
+  ctx.translate(canvas.width/2, canvas.height/2);
+  // llama first so balls draw over it slightly
+  if (state.llama){
+    ctx.save();
+    const r = state.llama.r;
+    ctx.font = `${Math.max(18, r*1.8)}px serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.shadowColor = '#f0abfc';
+    ctx.shadowBlur = 8;
+    ctx.fillText('🦙', state.llama.x, state.llama.y);
+    ctx.restore();
+  }
+
+  for (const b of state.balls) {
+    if (b.type === 'duck') {
+      // Draw a duck emoji as the boss
+      ctx.save();
+      ctx.font = `${Math.max(18, b.r*2)}px serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.shadowColor = '#fde047';
+      ctx.shadowBlur = 10;
+      ctx.fillText('🦆', b.x, b.y);
+      ctx.restore();
+      continue;
+    }
+
+    ctx.beginPath();
+    ctx.arc(b.x, b.y, b.r, 0, Math.PI*2);
+    // fill
+    ctx.fillStyle = b.color;
+    ctx.globalAlpha = 0.2;
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    // outline
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = b.outline;
+    ctx.shadowColor = b.outline;
+    ctx.shadowBlur = 12;
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function draw() {
+  // clear
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+
+  // vignette background aesthetic
+  const g = ctx.createRadialGradient(canvas.width/2, canvas.height/2, 60, canvas.width/2, canvas.height/2, canvas.width/2);
+  g.addColorStop(0, '#0b1220');
+  g.addColorStop(1, '#030712');
+  ctx.fillStyle = g;
+  ctx.fillRect(0,0,canvas.width,canvas.height);
+
+  drawHex(state.angle);
+  drawBalls();
+
+  // UI overlay crosshair subtle
+  ctx.save();
+  ctx.translate(canvas.width/2, canvas.height/2);
+  ctx.strokeStyle = 'rgba(148,163,184,0.12)';
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(-420,0); ctx.lineTo(420,0); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(0,-420); ctx.lineTo(0,420); ctx.stroke();
+  ctx.restore();
+}
+
+// ======= BOOT =======
+resetGame();
+</script>
+</body>
+</html>
